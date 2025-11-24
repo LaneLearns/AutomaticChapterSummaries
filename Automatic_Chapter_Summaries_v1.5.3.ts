@@ -4506,7 +4506,7 @@ async function dismissAutoDetectionNotification(): Promise<void> {
  */
 async function waitForEditorReady(maxWaitMs: number = EDITOR_READY_TIMEOUT): Promise<boolean> {
     const startTime: number = Date.now();
-    const checkInterval: number = 100;
+    const checkInterval: number = 50;
 
     if (DEBUG_MODE) {
         api.v1.log("Waiting for editor to be ready...");
