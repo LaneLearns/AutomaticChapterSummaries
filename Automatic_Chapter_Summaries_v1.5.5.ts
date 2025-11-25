@@ -1,7 +1,43 @@
-// Chapter Summarize v1.5.3: Manual condensation controls
+// Chapter Summarize v1.5.5: API compatibility update
 // At scene breaks, or new chapters this script will use GLM to summarize the content of the previous chapter,
 // add it as Lorebook entry and set it to always on.
 // Includes automatic token management, condensation, automatic change detection, and auto-regeneration.
+
+// CHANGELOG v1.5.5:
+// - [API COMPATIBILITY] Updated for NovelAI Script API breaking changes
+//   * api.v1.ui.modal.open() now returns a Promise<ModalHandle> instead of ModalHandle
+//   * All modal.open() calls now use await to get the handle
+//   * modal.close() is now async and must be awaited
+//   * Updated all modal usage patterns throughout the script
+// - [TECHNICAL] All 16 modal.open() calls updated for new async pattern
+// - [TECHNICAL] All modal.close() calls updated to await the promise
+// - [TECHNICAL] Updated modal callback patterns to async/await
+
+// CHANGELOG v1.5.4:
+// - [NEW FEATURE] Permissions system integration
+//   * Script now properly requests and checks for required permissions
+//   * Required permissions: lorebookEdit, documentEdit
+//   * UI displays permission status and request buttons
+//   * All lorebook and document operations guarded by permission checks
+//   * Graceful handling of missing permissions with user-friendly messages
+// - [IMPROVEMENT] Better error messages when permissions are missing
+// - [IMPROVEMENT] Status panel shows permission state
+// - [BUG FIX] Fixed category creation after permission grant
+//   * Created initializeLorebookCategory() helper function
+//   * Category now initializes properly when permissions granted via UI button
+//   * Prevents "category doesn't exist" errors after granting permissions
+// - [BUG FIX] Fixed "Loading..." stuck on UI boxes during initialization
+//   * changed-chapters-box and condensed-ranges-box now properly updated when permissions missing
+//   * Shows helpful message instead of stuck "Loading..." text
+//   * Prevents confusing UI state when script initializes without permissions
+//   * Added 100ms delay after UI registration to ensure panel is ready before updates
+//   * Improved error logging to always show UI update failures (not just in DEBUG_MODE)
+// - [IMPROVEMENT] Permissions box now hidden when permissions granted
+//   * Box only appears when permissions are missing (cleaner UI)
+//   * Automatically reappears if permissions become disabled
+//   * Uses display: none style for complete hiding
+// - [TECHNICAL] Updated to use api.v1.permissions.has() and api.v1.permissions.request()
+// - [TECHNICAL] Extracted category initialization logic for reuse after permission changes
 
 // CHANGELOG v1.5.3:
 // - [NEW FEATURE] Manual "Condense Again" functionality
@@ -358,7 +394,10 @@ const DEBUG_MODE: boolean = true;
 const MAX_RETRIES: number = 5;
 const RETRY_DELAYS: number[] = [1000, 2000, 3000, 4000, 5000]; // Progressive backoff
 const EDITOR_READY_TIMEOUT: number = 15000; // 15 seconds max wait
-const SCRIPT_VERSION: string = "1.5.3" // Script version number
+const SCRIPT_VERSION: string = api.v1.script.version;
+
+// Required permissions for this script (v1.5.4)
+const REQUIRED_PERMISSIONS: ScriptPermission[] = ["lorebookEdit", "documentEdit"];
 
 // Configuration Schema variables
 let chapterBreakToken: string = "";
@@ -395,6 +434,129 @@ let autoRegenerationInProgress: boolean = false;  // Prevents hook loops during 
 // Condensation warning state (v1.4.1)
 let condensationWarningShown: boolean = false;  // Track if we've shown the warning modal this session
 
+// Permissions state (v1.5.4)
+let hasRequiredPermissions: boolean = false;  // Track if we have all required permissions
+let permissionsChecked: boolean = false;  // Track if we've checked permissions at least once
+
+// ============================================================================
+// PERMISSIONS FUNCTIONS (v1.5.4)
+// ============================================================================
+
+/**
+ * Check if the script has all required permissions
+ * @returns Promise<boolean> true if all permissions are granted
+ */
+async function checkPermissions(): Promise<boolean> {
+    try {
+        const hasPerms = await api.v1.permissions.has(REQUIRED_PERMISSIONS);
+        permissionsChecked = true;
+        hasRequiredPermissions = hasPerms;
+        
+        if (DEBUG_MODE) {
+            api.v1.log(`Permissions check: ${hasPerms ? "✓ All granted" : "✗ Missing permissions"}`);
+        }
+        
+        return hasPerms;
+    } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        api.v1.error("Error checking permissions:", errorMsg);
+        permissionsChecked = true;
+        hasRequiredPermissions = false;
+        return false;
+    }
+}
+
+/**
+ * Initialize lorebook category - check storage, verify existence, create if needed
+ * v1.5.4: Extracted to helper function for reuse after permission grant
+ */
+async function initializeLorebookCategory(): Promise<void> {
+    try {
+        // Try to load category ID from storage first
+        lorebookCategoryId = await api.v1.storyStorage.get("chapterSummaryCategoryId") || "";
+
+        if (lorebookCategoryId) {
+            if (DEBUG_MODE) {
+                api.v1.log(`Loaded category ID from storage: ${lorebookCategoryId}`);
+            }
+        } else {
+            // See if Lorebook category exists
+            let catExists = await checkLorebookCategoryExists(lorebookCategoryName);
+
+            if (!catExists) {
+                api.v1.log("Category doesn't exist. Creating it.");
+                await createChapterSummariesLorebookCategory(lorebookCategoryName);
+            } else {
+                // Category exists, find and store its ID
+                const categories = await api.v1.lorebook.categories();
+                const category = categories.find(cat => cat.name === lorebookCategoryName);
+                if (category) {
+                    lorebookCategoryId = category.id;
+                    await api.v1.storyStorage.set("chapterSummaryCategoryId", lorebookCategoryId);
+                    if (DEBUG_MODE) {
+                        api.v1.log(`Found and stored category ID: ${lorebookCategoryId}`);
+                    }
+                }
+            }
+        }
+    } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        api.v1.error("Error initializing lorebook category:", errorMsg);
+    }
+}
+
+/**
+ * Request all required permissions from the user
+ * @returns Promise<boolean> true if all permissions were granted
+ */
+async function requestPermissions(): Promise<boolean> {
+    try {
+        if (DEBUG_MODE) {
+            api.v1.log("Requesting permissions:", REQUIRED_PERMISSIONS);
+        }
+        
+        const granted = await api.v1.permissions.request(REQUIRED_PERMISSIONS);
+        hasRequiredPermissions = granted;
+        permissionsChecked = true;
+        
+        if (granted) {
+            api.v1.log("✓ Permissions granted");
+            // v1.5.4: Initialize category after permissions granted
+            await initializeLorebookCategory();
+            // Refresh UI to show full functionality
+            await updateStatusPanel();
+        } else {
+            api.v1.log("✗ Permissions denied by user");
+        }
+        
+        return granted;
+    } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        api.v1.error("Error requesting permissions:", errorMsg);
+        hasRequiredPermissions = false;
+        permissionsChecked = true;
+        return false;
+    }
+}
+
+/**
+ * Guard function that checks permissions before executing an operation
+ * @param operation Name of the operation for error messages
+ * @returns Promise<boolean> true if operation can proceed
+ */
+async function ensurePermissions(operation: string): Promise<boolean> {
+    if (!permissionsChecked) {
+        await checkPermissions();
+    }
+    
+    if (!hasRequiredPermissions) {
+        api.v1.error(`Cannot ${operation}: Missing required permissions. Please grant permissions from the panel.`);
+        return false;
+    }
+    
+    return true;
+}
+
 // ============================================================================
 // HASHING FUNCTION
 // ============================================================================
@@ -429,6 +591,7 @@ function hashString(text: string): string {
  * @param isCondensed boolean whether the chapter is condensed
  */
 async function storeChapterFingerprint(chapterNumber: number, text: string, isCondensed: boolean = true): Promise<void> {
+    // Note: storyStorage doesn't require permissions, but this function is called after operations that do
     const fingerprints: ChapterFingerprint[] = await api.v1.storyStorage.get("chapterFingerprints") || [];
     const textHash = hashString(text);
 
@@ -519,6 +682,11 @@ async function isChapterCondensed(chapterNumber: number): Promise<boolean> {
  * @returns Promise<ChangedChapter[]> array of changed chapters
  */
 async function detectChangedChapters(): Promise<ChangedChapter[]> {
+    // v1.5.4: Check permissions before proceeding
+    if (!await ensurePermissions("detect changed chapters")) {
+        return [];
+    }
+    
     if (DEBUG_MODE) {
         api.v1.log("=== Detecting changed chapters ===");
     }
@@ -802,6 +970,11 @@ async function expandCondensedRange(range: CondensedRange): Promise<void> {
  * @param chapterNumber number Changed chapter to regenerate
  */
 async function regenerateChapter(chapterNumber: number): Promise<void> {
+    // v1.5.4: Check permissions before proceeding
+    if (!await ensurePermissions("regenerate chapter")) {
+        return;
+    }
+    
     api.v1.log(`=== Regenerating chapter ${chapterNumber} summary ===`);
 
     // v1.4.1: Check if this chapter is part of a condensed range
@@ -1328,7 +1501,7 @@ async function showCondensedRangeDetails(range: CondensedRange): Promise<void> {
                 text: "Uncondense This Chapter",
                 iconId: "file-plus",
                 callback: async () => {
-                    modal.close();
+                    await modal.close();
                     await confirmUncondenseSingleChapter(range, original.chapterNumber);
                 },
                 style: { marginBottom: "8px" }
@@ -1338,7 +1511,7 @@ async function showCondensedRangeDetails(range: CondensedRange): Promise<void> {
     
     // Open modal
     const modalTitle = range.startChapter === range.endChapter ? `Condensed Range: Chapter ${range.startChapter}` : `Condensed Range: Chapters ${range.startChapter}-${range.endChapter}`;
-    const modal = api.v1.ui.modal.open({
+    const modal = await api.v1.ui.modal.open({
         title: modalTitle,
         size: "large",
         content: modalContent
@@ -1616,7 +1789,7 @@ async function confirmUncondenseRange(range: CondensedRange): Promise<void> {
                     callback: async () => {
                         // Close modal first to unblock UI
                         if (modalRef.modal) {
-                            modalRef.modal.close();
+                            await modalRef.modal.close();
                         }
                         // Then perform the operation
                         await uncondenseEntireRange(range);
@@ -1629,7 +1802,7 @@ async function confirmUncondenseRange(range: CondensedRange): Promise<void> {
                     iconId: "x",
                     callback: async () => {
                         if (modalRef.modal) {
-                            modalRef.modal.close();
+                            await modalRef.modal.close();
                         }
                     }
                 }
@@ -1637,7 +1810,7 @@ async function confirmUncondenseRange(range: CondensedRange): Promise<void> {
         }
     ];
     
-    modalRef.modal = api.v1.ui.modal.open({
+    modalRef.modal = await api.v1.ui.modal.open({
         title: "Confirm Uncondense",
         size: "medium",
         content: modalContent
@@ -1776,7 +1949,7 @@ async function confirmUncondenseSingleChapter(range: CondensedRange, chapterNumb
                     text: "Uncondense Chapter",
                     iconId: "check",
                     callback: async () => {
-                        modal.close();
+                        await modal.close();
                         await uncondenseSingleChapter(range, chapterNumber, newRanges);
                     },
                     style: { marginRight: "8px" }
@@ -1785,15 +1958,15 @@ async function confirmUncondenseSingleChapter(range: CondensedRange, chapterNumb
                     type: "button",
                     text: "Cancel",
                     iconId: "x",
-                    callback: () => {
-                        modal.close();
+                    callback: async () => {
+                        await modal.close();
                     }
                 }
             ]
         }
     ];
     
-    const modal = api.v1.ui.modal.open({
+    const modal = await api.v1.ui.modal.open({
         title: "Confirm Uncondense Single Chapter",
         size: "medium",
         content: modalContent
@@ -2196,7 +2369,7 @@ async function showRebuildPreview(analysis: RebuildAnalysis): Promise<any> {
     previewText += `\n⚠️ **Warning:** This action cannot easily be undone. A backup will be created in storage, but all lorebook entries will be replaced.\n`;
 
     // Create preview modal
-    const modal = api.v1.ui.modal.open({
+    const modal = await api.v1.ui.modal.open({
         title: "🔄 Rebuild All Chapters - Preview",
         size: "large",
         content: [
@@ -2217,11 +2390,11 @@ async function showRebuildPreview(analysis: RebuildAnalysis): Promise<any> {
                         type: "button",
                         text: "Cancel",
                         iconId: "x",
-                        callback: () => {
+                        callback: async () => {
                             if (DEBUG_MODE) {
                                 api.v1.log("Rebuild cancelled by user.");
                             }
-                            modal.close();
+                            await modal.close();
                         },
                         style: { marginRight: "8px" }
                     },
@@ -2230,7 +2403,7 @@ async function showRebuildPreview(analysis: RebuildAnalysis): Promise<any> {
                         text: "Continue With Rebuild",
                         iconId: "refresh",
                         callback: async () => {
-                            modal.close();
+                            await modal.close();
 
                             if (DEBUG_MODE) {
                                 api.v1.log("Rebuild confirmed by user, starting full rebuild");
@@ -2642,8 +2815,8 @@ async function viewBackupDetails(backup: RebuildBackup): Promise<void> {
             type: "button",
             text: "← Back to List",
             iconId: "chevron-left",
-            callback: () => {
-                modal.close();
+            callback: async () => {
+                await modal.close();
                 modal.closed.then(() => {
                     showBackupModal();
                 });
@@ -2685,8 +2858,8 @@ async function viewBackupDetails(backup: RebuildBackup): Promise<void> {
                     type: "button",
                     text: "Close",
                     iconId: "x",
-                    callback: () => {
-                        modal.close();
+                    callback: async () => {
+                        await modal.close();
                     },
                     style: { marginRight: "8px" }
                 },
@@ -2694,60 +2867,58 @@ async function viewBackupDetails(backup: RebuildBackup): Promise<void> {
                     type: "button",
                     text: "Restore This Backup",
                     iconId: "refresh",
-                    callback: () => {
-                        modal.close();
-                        modal.closed.then(() => {
-                            // Open confirmation modal
-                            const confirmModal = api.v1.ui.modal.open({
-                                title: "⚠️ Confirm Restore",
-                                size: "medium",
-                                content: [
-                                    {
-                                        type: "text",
-                                        text: `**Are you sure you want to restore this backup?**\n\nThis will replace all current chapter summaries with the backup from:\n\n📅 ${new Date(backup.timestamp).toLocaleString()}\n📝 ${backup.reason}\n\n⚠️ **Warning:** Your current summaries will be lost unless you create a new backup first.`,
-                                        markdown: true
-                                    },
-                                    {
-                                        type: "row",
-                                        spacing: "end",
-                                        content: [
-                                            {
-                                                type: "button",
-                                                text: "Cancel",
-                                                iconId: "x",
-                                                callback: () => {
-                                                    confirmModal.close();
-                                                    confirmModal.closed.then(() => {
-                                                        viewBackupDetails(backup);
+                    callback: async () => {
+                        await modal.close();
+                        await modal.closed;
+                        // Open confirmation modal
+                        const confirmModal = await api.v1.ui.modal.open({
+                            title: "⚠️ Confirm Restore",
+                            size: "medium",
+                            content: [
+                                {
+                                    type: "text",
+                                    text: `**Are you sure you want to restore this backup?**\n\nThis will replace all current chapter summaries with the backup from:\n\n📅 ${new Date(backup.timestamp).toLocaleString()}\n📝 ${backup.reason}\n\n⚠️ **Warning:** Your current summaries will be lost unless you create a new backup first.`,
+                                    markdown: true
+                                },
+                                {
+                                    type: "row",
+                                    spacing: "end",
+                                    content: [
+                                        {
+                                            type: "button",
+                                            text: "Cancel",
+                                            iconId: "x",
+                                            callback: async () => {
+                                                await confirmModal.close();
+                                                await confirmModal.closed;
+                                                viewBackupDetails(backup);
+                                            }
+                                        },
+                                        {
+                                            type: "button",
+                                            text: "Yes, Restore",
+                                            iconId: "check",
+                                            callback: async () => {
+                                                await confirmModal.close();
+                                                
+                                                try {
+                                                    await restoreFromBackup(backup);
+                                                    api.v1.ui.larry.help({
+                                                        question: `✓ Successfully restored backup from ${new Date(backup.timestamp).toLocaleString()}`,
+                                                        options: [{ text: "OK", callback: () => {} }]
+                                                    });
+                                                } catch (error: any) {
+                                                    api.v1.ui.larry.help({
+                                                        question: `Failed to restore backup: ${error instanceof Error ? error.message : String(error)}`,
+                                                        options: [{ text: "OK", callback: () => {} }]
                                                     });
                                                 }
-                                            },
-                                            {
-                                                type: "button",
-                                                text: "Yes, Restore",
-                                                iconId: "check",
-                                                callback: async () => {
-                                                    confirmModal.close();
-                                                    
-                                                    try {
-                                                        await restoreFromBackup(backup);
-                                                        api.v1.ui.larry.help({
-                                                            question: `✓ Successfully restored backup from ${new Date(backup.timestamp).toLocaleString()}`,
-                                                            options: [{ text: "OK", callback: () => {} }]
-                                                        });
-                                                    } catch (error: any) {
-                                                        api.v1.ui.larry.help({
-                                                            question: `Failed to restore backup: ${error instanceof Error ? error.message : String(error)}`,
-                                                            options: [{ text: "OK", callback: () => {} }]
-                                                        });
-                                                    }
-                                                }
                                             }
-                                        ],
-                                        style: { marginTop: "16px" }
-                                    }
-                                ]
-                            });
+                                        }
+                                    ],
+                                    style: { marginTop: "16px" }
+                                }
+                            ]
                         });
                     }
                 }
@@ -2756,7 +2927,7 @@ async function viewBackupDetails(backup: RebuildBackup): Promise<void> {
         }
     ];
     
-    const modal = api.v1.ui.modal.open({
+    const modal = await api.v1.ui.modal.open({
         title: `📦 Backup Details: ${backup.reason}`,
         size: "large",
         content: content
@@ -3588,10 +3759,10 @@ async function buildBackupListContent(backups: RebuildBackup[], modalRef: { moda
                     type: "button",
                     text: "View Details",
                     iconId: "eye",
-                    callback: () => {
+                    callback: async () => {
                         const currentModal = modalRef.modal!;
                         api.v1.log(`[v1.5.0] Closing list modal...`);
-                        currentModal.close();
+                        await currentModal.close();
                         currentModal.closed.then(async () => {
                             api.v1.log(`[v1.5.0] List modal closed, opening details...`);
                             try {
@@ -3614,7 +3785,7 @@ async function buildBackupListContent(backups: RebuildBackup[], modalRef: { moda
                         modalRef.modal!.close();
                         
                         // Open confirmation modal
-                        const confirmModal = api.v1.ui.modal.open({
+                        const confirmModal = await api.v1.ui.modal.open({
                             title: "⚠️ Confirm Restore",
                             size: "medium",
                             content: [
@@ -3632,11 +3803,11 @@ async function buildBackupListContent(backups: RebuildBackup[], modalRef: { moda
                                             type: "button",
                                             text: "Cancel",
                                             iconId: "x",
-                                            callback: () => {
+                                            callback: async () => {
                                                 if (DEBUG_MODE) {
                                                     api.v1.log("Restore cancelled by user");
                                                 }
-                                                confirmModal.close();
+                                                await confirmModal.close();
                                                 // Reopen backup list modal
                                                 showBackupModal();
                                             },
@@ -3648,7 +3819,7 @@ async function buildBackupListContent(backups: RebuildBackup[], modalRef: { moda
                                             iconId: "check",
                                             callback: async () => {
                                                 try {
-                                                    confirmModal.close();
+                                                    await confirmModal.close();
                                                     
                                                     // Show restoring message
                                                     await api.v1.ui.updateParts([{
@@ -3748,7 +3919,7 @@ async function showBackupModal(): Promise<void> {
         const modalContent: UIPart[] = await buildBackupListContent(backups, modalRef);
         
         // Create modal with content
-        modalRef.modal = api.v1.ui.modal.open({
+        modalRef.modal = await api.v1.ui.modal.open({
             title: "📦 Storage Backups",
             size: "large",
             content: modalContent
@@ -4053,8 +4224,8 @@ async function checkTokenBudgetForAutoRegeneration(changedChapters: ChangedChapt
     modalContent += `- **Cancel:** Keep chapters in changed list. Regenerate manually later (recommended if you want to review first).\n\n`;
     modalContent += `_This is just an estimate. Actual token usage may vary._`;
 
-    return new Promise((resolve) => {
-        const modal = api.v1.ui.modal.open({
+    return new Promise(async (resolve) => {
+        const modal = await api.v1.ui.modal.open({
             title: wouldExceedHardLimit ? "⚠️ Token Limit Would Be Exceeded" : "⚠️ Token Budget Warning",
             size: "medium",
             content: [
@@ -4072,11 +4243,11 @@ async function checkTokenBudgetForAutoRegeneration(changedChapters: ChangedChapt
                             type: "button",
                             text: "Cancel",
                             iconId: "x",
-                            callback: () => {
+                            callback: async () => {
                                 if (DEBUG_MODE) {
                                     api.v1.log("User cancelled auto-regeneration due to token budget");
                                 }
-                                modal.close();
+                                await modal.close();
                                 resolve(false);
                             },
                             style: { marginRight: "8px" }
@@ -4085,11 +4256,11 @@ async function checkTokenBudgetForAutoRegeneration(changedChapters: ChangedChapt
                             type: "button",
                             text: "Proceed Anyway",
                             iconId: "check",
-                            callback: () => {
+                            callback: async () => {
                                 if (DEBUG_MODE) {
                                     api.v1.log("User chose to proceed with auto-regeneration despite token budget warning");
                                 }
-                                modal.close();
+                                await modal.close();
                                 resolve(true);
                             }
                         }
@@ -4157,7 +4328,7 @@ async function checkTokenBudgetAfterGeneration(): Promise<void> {
 
         condensationWarningShown = true; // Don't show again until next time we're under threshold
 
-        const modal = api.v1.ui.modal.open({
+        const modal = await api.v1.ui.modal.open({
             title: "⚠️ Token Budget Warning",
             size: "medium",
             content: [
@@ -4185,11 +4356,11 @@ async function checkTokenBudgetAfterGeneration(): Promise<void> {
                             type: "button",
                             text: "Continue",
                             iconId: "check",
-                            callback: () => {
+                            callback: async () => {
                                 if (DEBUG_MODE) {
                                     api.v1.log("User chose to continue without condensing");
                                 }
-                                modal.close();
+                                await modal.close();
                             },
                             style: { marginRight: "8px" }
                         },
@@ -4201,7 +4372,7 @@ async function checkTokenBudgetAfterGeneration(): Promise<void> {
                                 if (DEBUG_MODE) {
                                     api.v1.log("User chose to condense now");
                                 }
-                                modal.close();
+                                await modal.close();
                                 await manualCondense();
                             }
                         }
@@ -4372,8 +4543,8 @@ async function showGenerationLimitModal(
     modalContent += `- **Skip for Now:** Stop auto-regeneration. You can manually regenerate later from the panel.\n\n`;
     modalContent += `_The generation counter resets automatically when you generate text in the editor or interact with the UI._`;
 
-    return new Promise((resolve) => {
-        const modal = api.v1.ui.modal.open({
+    return new Promise(async (resolve) => {
+        const modal = await api.v1.ui.modal.open({
             title: "⚠️ Generation Limit Reached",
             size: "medium",
             content: [
@@ -4391,11 +4562,11 @@ async function showGenerationLimitModal(
                             type: "button",
                             text: "Skip for Now",
                             iconId: "x",
-                            callback: () => {
+                            callback: async () => {
                                 if (DEBUG_MODE) {
                                     api.v1.log("User chose to skip remaining auto-regenerations");
                                 }
-                                modal.close();
+                                await modal.close();
                                 resolve(false);
                             },
                             style: { marginRight: "8px" }
@@ -4404,11 +4575,11 @@ async function showGenerationLimitModal(
                             type: "button",
                             text: "Continue",
                             iconId: "refresh",
-                            callback: () => {
+                            callback: async () => {
                                 if (DEBUG_MODE) {
                                     api.v1.log("User chose to continue auto-regenerations");
                                 }
-                                modal.close();
+                                await modal.close();
                                 resolve(true);
                             }
                         }
@@ -4440,8 +4611,8 @@ async function showMultiChapterLimitModal(
     modalContent += `- **Skip for Now:** Stop processing. You can manually generate summaries from the panel.\n\n`;
     modalContent += `_The generation counter resets automatically when you generate text in the editor._`;
 
-    return new Promise((resolve) => {
-        const modal = api.v1.ui.modal.open({
+    return new Promise(async (resolve) => {
+        const modal = await api.v1.ui.modal.open({
             title: "⚠️ Generation Limit Reached",
             size: "medium",
             content: [
@@ -4459,11 +4630,11 @@ async function showMultiChapterLimitModal(
                             type: "button",
                             text: "Skip for Now",
                             iconId: "x",
-                            callback: () => {
+                            callback: async () => {
                                 if (DEBUG_MODE) {
                                     api.v1.log("User chose to skip remaining multi-chapter processing");
                                 }
-                                modal.close();
+                                await modal.close();
                                 resolve(false);
                             },
                             style: { marginRight: "8px" }
@@ -4472,11 +4643,11 @@ async function showMultiChapterLimitModal(
                             type: "button",
                             text: "Continue",
                             iconId: "refresh",
-                            callback: () => {
+                            callback: async () => {
                                 if (DEBUG_MODE) {
                                     api.v1.log("User chose to continue multi-chapter processing");
                                 }
-                                modal.close();
+                                await modal.close();
                                 resolve(true);
                             }
                         }
@@ -4716,6 +4887,11 @@ async function archiveSummaries(entries: ChapterSummaryEntry[]): Promise<void> {
  * Condense multiple summaries into one
  */
 async function condenseSummaries(entriesToCondense: ChapterSummaryEntry[], condensedTitle: string): Promise<string> {
+    // v1.5.4: Check permissions before proceeding
+    if (!await ensurePermissions("condense summaries")) {
+        throw new Error("Missing required permissions");
+    }
+    
     api.v1.log(`Condensing ${entriesToCondense.length} summaries: ${condensedTitle}`);
 
     // Archive the originals
@@ -5323,7 +5499,7 @@ Provide a concise narrative summary that captures the key plot points, character
         ? `Over threshold (${threshold} tokens) - condensation will run`
         : `Below threshold (${threshold} tokens) - condensation may not run`;
 
-    const modal = api.v1.ui.modal.open({
+    const modal = await api.v1.ui.modal.open({
         title: "Re-Condense With Custom Settings",
         size: "large",
         content: [
@@ -5390,7 +5566,7 @@ Provide a concise narrative summary that captures the key plot points, character
                         type: "button",
                         text: "Cancel",
                         callback: async () => {
-                            modal.close();
+                            await modal.close();
                         },
                         style: { marginRight: "8px" }
                     },
@@ -5415,7 +5591,7 @@ Provide a concise narrative summary that captures the key plot points, character
                                 return;
                             }
 
-                            modal.close();
+                            await modal.close();
 
                             // Store custom settings temporarily
                             await api.v1.storyStorage.set("tempCondensePrompt", customPrompt);
@@ -5520,7 +5696,7 @@ async function showManualCondenseModal(): Promise<void> {
     let startChapter = 1;
     let endChapter = totalCompleteChapters;
 
-    const modal = api.v1.ui.modal.open({
+    const modal = await api.v1.ui.modal.open({
         title: "Condense Specific Range",
         size: "medium",
         content: [
@@ -5587,7 +5763,7 @@ async function showManualCondenseModal(): Promise<void> {
                         type: "button",
                         text: "Cancel",
                         callback: async () => {
-                            modal.close();
+                            await modal.close();
                         },
                         style: { marginRight: "8px" }
                     },
@@ -5634,7 +5810,7 @@ async function showManualCondenseModal(): Promise<void> {
                                 return;
                             }
 
-                            modal.close();
+                            await modal.close();
 
                             await api.v1.ui.updateParts([{
                                 id: "condensation-status",
@@ -5814,14 +5990,135 @@ async function buildChangedChaptersUI(): Promise<UIPart[]> {
 }
 
 /**
+ * v1.5.4: Update permissions UI box
+ */
+async function updatePermissionsUI(): Promise<void> {
+    if (!permissionsChecked) {
+        await checkPermissions();
+    }
+    
+    try {
+        if (DEBUG_MODE) {
+            api.v1.log(`Updating permissions box (hasPermissions: ${hasRequiredPermissions})...`);
+        }
+        
+        // v1.5.4: Hide permissions box when granted, show when missing
+        if (hasRequiredPermissions) {
+            // Hide the box by making it empty with no padding/margin
+            await api.v1.ui.updateParts([{
+                id: "permissions-box",
+                content: [],
+                style: {
+                    display: "none"
+                }
+            }]);
+        } else {
+            // Show the box with warning and grant button
+            let permText = "**⚠️ Missing Permissions**\n\n";
+            permText += "This script requires the following permissions:\n";
+            permText += "- **lorebookEdit**: Create and manage chapter summaries\n";
+            permText += "- **documentEdit**: Scan document for chapters\n\n";
+            permText += "Click the button below to grant permissions.";
+            
+            const permButton: UIPart = {
+                type: "button",
+                text: "Grant Permissions",
+                iconId: "lock",
+                callback: async () => {
+                    const granted = await requestPermissions();
+                    if (granted) {
+                        await updatePermissionsUI();
+                        await updateStatusPanel();
+                    }
+                },
+                style: { marginTop: "8px" }
+            };
+            
+            const content: UIPart[] = [
+                {
+                    type: "text",
+                    id: "permissions-status",
+                    text: permText,
+                    markdown: true
+                },
+                permButton
+            ];
+            
+            await api.v1.ui.updateParts([{
+                id: "permissions-box",
+                content: content,
+                style: {
+                    padding: "12px",
+                    backgroundColor: "rgba(64, 0, 0, 0.2)",
+                    borderRadius: "4px",
+                    marginBottom: "12px",
+                    border: "1px solid rgba(255, 0, 0, 0.3)"
+                }
+            }]);
+        }
+        
+        if (DEBUG_MODE) {
+            api.v1.log("✓ Permissions box updated successfully");
+        }
+    } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        api.v1.error("Failed to update permissions UI:", errorMsg);
+    }
+}
+
+/**
  * Update the UI panel with current status
  * MODIFIED in v1.2.0: Added token usage display
  * MODIFIED in v1.2.1: Added background work indicator
  * MODIFIED in v1.3.0: Dynamic changed chapters UI
+ * MODIFIED in v1.5.4: Added permissions check
  */
 async function updateStatusPanel(): Promise<void> {
     if (DEBUG_MODE) {
         api.v1.log("Updating status panel...");
+    }
+    
+    // v1.5.4: Update permissions UI first
+    await updatePermissionsUI();
+    
+    // If no permissions, show limited UI
+    if (!hasRequiredPermissions) {
+        try {
+            if (DEBUG_MODE) {
+                api.v1.log("Updating UI with no-permissions message...");
+            }
+            await api.v1.ui.updateParts([
+                {
+                    id: "status-display",
+                    text: "**⚠️ Permissions Required**\n\nPlease grant the required permissions above to use this script."
+                },
+                {
+                    id: "changed-chapters-box",
+                    content: [{
+                        type: "text",
+                        text: "_Permissions required to detect changed chapters_",
+                        markdown: true,
+                        style: { fontStyle: "italic", color: "rgba(255, 255, 255, 0.5)" }
+                    }]
+                },
+                {
+                    id: "condensed-ranges-box",
+                    content: [{
+                        type: "text",
+                        text: "_Permissions required to view condensed ranges_",
+                        markdown: true,
+                        style: { fontStyle: "italic", color: "rgba(255, 255, 255, 0.5)" }
+                    }]
+                }
+            ]);
+            if (DEBUG_MODE) {
+                api.v1.log("✓ No-permissions UI updated successfully");
+            }
+        } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            api.v1.error("Failed to update status panel (no permissions):", errorMsg);
+        }
+        return;
     }
 
     const failed = await getFailedChapters();
@@ -6349,6 +6646,11 @@ async function scanForPreviousChapter(sections: DocumentSections): Promise<{ tex
  * MODIFIED in v1.2.0: Added checkAndCondenseIfNeeded() call at the end
  */
 async function generateChapterSummary(chapterData: { text: string; title: string | null }) {
+    // v1.5.4: Check permissions before proceeding
+    if (!await ensurePermissions("generate chapter summary")) {
+        return;
+    }
+    
     let pendingChapter = await api.v1.storyStorage.get("pendingChapter") || 1;
 
     try {
@@ -6485,6 +6787,14 @@ async function generateChapterSummary(chapterData: { text: string; title: string
  */
 const onResponseHook: OnResponse = async (params) => {
     if (params.final) {
+        // v1.5.4: Check permissions before any automatic processing
+        if (!hasRequiredPermissions) {
+            if (DEBUG_MODE) {
+                api.v1.log("Skipping onResponse hook - missing required permissions");
+            }
+            return;
+        }
+        
         // v1.4.0: Skip if this is an auto-regeneration generation (prevents loops)
         if (autoRegenerationInProgress) {
             if (DEBUG_MODE) {
@@ -6694,32 +7004,14 @@ const onContextBuiltHook: OnContextBuilt = async (params) => {
 
     api.v1.log(`Automatic Chapter Summaries v${SCRIPT_VERSION} Initialized at: ${new Date().toLocaleString()}`);
 
-    // Try to load category ID from storage first
-    lorebookCategoryId = await api.v1.storyStorage.get("chapterSummaryCategoryId") || "";
-
-    if (lorebookCategoryId) {
-        if (DEBUG_MODE) {
-            api.v1.log(`Loaded category ID from storage: ${lorebookCategoryId}`);
-        }
+    // v1.5.4: Check permissions before proceeding with lorebook operations
+    await checkPermissions();
+    
+    if (hasRequiredPermissions) {
+        // v1.5.4: Initialize lorebook category using helper function
+        await initializeLorebookCategory();
     } else {
-        // See if Lorebook category exists
-        let catExists = await checkLorebookCategoryExists(lorebookCategoryName);
-
-        if (!catExists) {
-            api.v1.log("Category doesn't exist. Creating it.");
-            await createChapterSummariesLorebookCategory(lorebookCategoryName);
-        } else {
-            // Category exists, find and store its ID
-            const categories = await api.v1.lorebook.categories();
-            const category = categories.find(cat => cat.name === lorebookCategoryName);
-            if (category) {
-                lorebookCategoryId = category.id;
-                await api.v1.storyStorage.set("chapterSummaryCategoryId", lorebookCategoryId);
-                if (DEBUG_MODE) {
-                    api.v1.log(`Found and stored category ID: ${lorebookCategoryId}`);
-                }
-            }
-        }
+        api.v1.log("⚠️ Missing required permissions. Please grant permissions from the panel to use this script.");
     }
 
     // Register UI Panel
@@ -6730,6 +7022,26 @@ const onContextBuiltHook: OnContextBuilt = async (params) => {
                 id: "panel-title",
                 text: `### Automatic Chapter Summaries v${SCRIPT_VERSION}\n\nManage chapter summary generation, token usage, condensation, and retroactive edits.`,
                 markdown: true
+            },
+            // v1.5.4: Permissions status box
+            {
+                type: "box",
+                id: "permissions-box",
+                content: [
+                    {
+                        type: "text",
+                        id: "permissions-status",
+                        text: "Checking permissions...",
+                        markdown: true
+                    }
+                ],
+                style: {
+                    padding: "12px",
+                    backgroundColor: hasRequiredPermissions ? "rgba(0, 64, 0, 0.2)" : "rgba(64, 0, 0, 0.2)",
+                    borderRadius: "4px",
+                    marginBottom: "12px",
+                    border: hasRequiredPermissions ? "1px solid rgba(0, 255, 0, 0.3)" : "1px solid rgba(255, 0, 0, 0.3)"
+                }
             },
             {
                 type: "box",
@@ -7378,6 +7690,9 @@ const onContextBuiltHook: OnContextBuilt = async (params) => {
         iconId: "file-text",
         content: panelContent
     }]);
+
+    // v1.5.4: Small delay to ensure panel is fully registered before updating
+    await api.v1.timers.sleep(100);
 
     // Update the status panel
     await updateStatusPanel();
