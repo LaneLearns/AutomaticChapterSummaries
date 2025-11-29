@@ -1,11 +1,11 @@
 # Automatic Chapter Summaries for NovelAI
 
-**Version 1.5.6** | *Last Updated: November 27, 2025*
+**Version 1.6.0** | *Last Updated: November 29, 2025*
 
 A powerful NovelAI script that automatically generates, manages, and condenses chapter summaries as you write. Keep your lorebook organized and your token budget under control with intelligent automation and manual controls.
 
 [![NovelAI](https://img.shields.io/badge/NovelAI-Script-purple)](https://novelai.net/)
-[![Version](https://img.shields.io/badge/version-1.5.6-blue)](https://github.com/LaneRendell/AutomaticChapterSummaries/releases)
+[![Version](https://img.shields.io/badge/version-1.6.0-blue)](https://github.com/LaneRendell/AutomaticChapterSummaries/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ---
@@ -19,11 +19,13 @@ A powerful NovelAI script that automatically generates, manages, and condenses c
 - **💾 Backup System** - Complete snapshots for safe recovery and rollback
 - **🎛️ Manual Controls** - Fine-tuned control over condensation and regeneration
 - **📦 Smart Condensation** - Combine chapters strategically to save tokens
+- **🕐 History-Aware Tracking** - Automatic undo/redo management of summaries
 
-### What's New in v1.5.6
-- **🐛 Status Panel Fix** - Fixed panel stuck on "Loading..." after initialization
-- **🔧 API Compatibility** - (v1.5.5) Updated for NovelAI Script API breaking changes
-- **🔒 Permissions System** - (v1.5.4) Proper permission checking and UI feedback
+### What's New in v1.6.0
+- **🕐 History-Aware Tracking** - Auto-manage summaries when using undo/redo/retry
+- **🐛 Rebuild Fix** - No longer counts in-progress chapter during rebuild
+- **🐛 Backup Fix** - Fixed backup failing on new stories
+- **🐛 Entry ID Fix** - Condensed ranges now work correctly after redo operations
 
 ### Key Capabilities
 - Detect chapter breaks automatically using configurable tokens
@@ -56,7 +58,7 @@ A powerful NovelAI script that automatically generates, manages, and condenses c
    ```
 
 2. **Copy to NovelAI**
-   - Open the `Automatic_Chapter_Summaries_v1.5.6.ts` file
+   - Open the `Automatic_Chapter_Summaries_v1.6.0.ts` file
    - Copy the entire contents
    - In NovelAI, navigate to the script editor
    - Paste the script and save
@@ -69,7 +71,7 @@ A powerful NovelAI script that automatically generates, manages, and condenses c
 4. **Activate**
    - Enable the script in NovelAI
    - Grant required permissions (lorebookEdit, documentEdit)
-   - Open the "Chapter Summaries v1.5.6" panel
+   - Open the "Chapter Summaries v1.6.0" panel
    - Start writing!
 
 ---
@@ -106,6 +108,7 @@ A powerful NovelAI script that automatically generates, manages, and condenses c
 |---------|------|---------|-------------|
 | `auto_detect_on_generation` | boolean | `false` | Auto-detect changed chapters after generating |
 | `auto_regenerate` | boolean | `false` | Auto-regenerate detected changes (requires auto_detect) |
+| `history_aware_tracking` | boolean | `true` | Auto-manage summaries on undo/redo (v1.6.0+) |
 
 ### Backups
 
@@ -186,9 +189,9 @@ Manually select chapters to condense:
 ## 📖 Documentation
 
 - **[USER_MANUAL.md](USER_MANUAL.md)** - Comprehensive 500+ line guide covering all features
+- **[CHANGELOG_v1.6.0.md](docs/CHANGELOG_v1.6.0.md)** - v1.6.0 history-aware tracking details
 - **[CHANGELOG_v1.5.6.md](docs/CHANGELOG_v1.5.6.md)** - v1.5.6 status panel fix details
 - **[CHANGELOG_v1.5.4.md](CHANGELOG_v1.5.4.md)** - v1.5.4 permissions system changelog
-- **[CHANGELOG_v1.5.3.md](CHANGELOG_v1.5.3.md)** - v1.5.3 manual controls changelog
 
 ### Quick Links
 - [Configuration Options](USER_MANUAL.md#configuration-options) - All settings explained
@@ -261,7 +264,7 @@ Manually select chapters to condense:
 - Verify `chapter_break_token` config matches your usage
 
 **Token Count Wrong?**
-- Update to v1.5.6 (includes all fixes)
+- Update to v1.6.0 (includes all fixes)
 - Check for manual edits to lorebook entries
 - Try "Full Rebuild" to resync
 
@@ -286,6 +289,7 @@ See [USER_MANUAL.md#troubleshooting](USER_MANUAL.md#troubleshooting) for detaile
 
 ## 📊 Version History
 
+- **v1.6.0** (2025-11-29) - History-aware tracking for undo/redo, rebuild and backup fixes
 - **v1.5.6** (2025-11-27) - Fixed status panel stuck on "Loading..." after init
 - **v1.5.5** (2025-11-25) - API compatibility update for modal system changes
 - **v1.5.4** (2025-11-24) - Permissions system integration and UI improvements
@@ -298,7 +302,7 @@ See [USER_MANUAL.md#troubleshooting](USER_MANUAL.md#troubleshooting) for detaile
 - **v1.3.x** (2025-11) - Change detection and fingerprinting
 - **v1.2.x** (2025-11) - Chapter break detection fixes
 
-See [CHANGELOG_v1.5.6.md](docs/CHANGELOG_v1.5.6.md) for latest changes or [CHANGELOG_v1.5.3.md](docs/CHANGELOG_v1.5.3.md) for feature history.
+See [CHANGELOG_v1.6.0.md](docs/CHANGELOG_v1.6.0.md) for latest changes or [CHANGELOG_v1.5.3.md](docs/CHANGELOG_v1.5.3.md) for feature history.
 
 ---
 
